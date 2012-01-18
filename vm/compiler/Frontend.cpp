@@ -1501,6 +1501,21 @@ static bool compileLoop(CompilationUnit *cUnit, unsigned int startOffset,
         changed = exhaustTrace(cUnit, curBlock);
     } while (changed);
 
+#ifdef BYTECODE_FILTER_FOR_PHASE1_PORTING
+    GrowableListIterator iterator;
+    MIR *insn;
+    dvmGrowableListIteratorInit(&cUnit->blockList, &iterator);
+    while (true) {
+        BasicBlock *bbscan = (BasicBlock *) dvmGrowableListIteratorNext(&iterator);
+        if (bbscan == NULL) break;
+        if (bbscan->blockType == kDalvikByteCode) {
+            for (insn = bbscan->firstMIRInsn; insn; insn = insn->next)
+                if (!dvmIsOpcodeSupportedByJit(insn->dalvikInsn.opcode))
+                    goto bail;
+        }
+    }
+#endif
+
     /* Backward chaining block */
     bb = dvmCompilerNewBB(kChainingCellBackwardBranch, cUnit->numBlocks++);
     dvmInsertGrowableList(&cUnit->blockList, (intptr_t) bb);
