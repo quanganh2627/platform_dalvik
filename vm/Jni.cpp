@@ -758,12 +758,59 @@ static bool dvmRegisterJNIMethod(ClassObject* clazz, const char* methodName,
         ALOGV("Note: %s.%s:%s was already registered", clazz->descriptor, methodName, signature);
     }
 
+#ifdef WITH_HOUDINI
+    if (gDvm.libhoudiniInited && gDvm.dvm2hdNeeded(fnPtr)) {
+        method->needHoudini = true;
+    }
+#endif
+
     method->fastJni = fastJni;
     dvmUseJNIBridge(method, fnPtr);
 
     ALOGV("JNI-registered %s.%s:%s", clazz->descriptor, methodName, signature);
     return true;
 }
+
+
+#ifdef WITH_HOUDINI
+void dvmHoudiniPlatformInvoke(void* pEnv, ClassObject* clazz, int argInfo, int argc,
+    const u4* argv, const char* shorty, void* func, JValue* pReturn)
+{
+    const int kMaxArgs = ((argc >= 0) ? argc : 0)+2;    /* +1 for env, maybe +1 for clazz */
+    unsigned char types[kMaxArgs+1];
+    void* values[kMaxArgs];
+    char retType;
+    char sigByte;
+    int dstArg;
+
+    types[0] = 'L';
+    values[0] = &pEnv;
+
+    types[1] = 'L';
+    if (clazz != NULL) {
+        values[1] = &clazz;
+    } else {
+        values[1] = (void*)argv++;
+    }
+    dstArg = 2;
+
+    /*
+     * Scan the types out of the short signature.  Use them to fill out the
+     * "types" array.  Store the start address of the argument in "values".
+     */
+    retType = *shorty;
+    while ((sigByte = *++shorty) != '\0') {
+        types[dstArg] = sigByte;
+        values[dstArg++] = (void*)argv++;
+        if (sigByte == 'D' || sigByte == 'J') {
+            argv++;
+        }
+    }
+    types[dstArg] = '\0';
+
+    gDvm.dvm2hdNativeMethodHelper(false, func, retType, pReturn, dstArg, types, (const void**)values);
+}
+#endif
 
 static const char* builtInPrefixes[] = {
     "Landroid/",
@@ -1149,6 +1196,13 @@ void dvmCallJNIMethod(const u4* args, JValue* pResult, const Method* method, Thr
 
     JNIEnv* env = self->jniEnv;
     COMPUTE_STACK_SUM(self);
+#ifdef WITH_HOUDINI
+    if (dvmNeedHoudiniMethod(method))
+        dvmHoudiniPlatformInvoke(env, (ClassObject*)staticMethodClass,
+            method->jniArgInfo, method->insSize, modArgs, method->shorty,
+            (void*)method->insns, pResult);
+    else
+#endif
     dvmPlatformInvoke(env,
             (ClassObject*) staticMethodClass,
             method->jniArgInfo, method->insSize, modArgs, method->shorty,

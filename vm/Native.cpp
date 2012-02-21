@@ -25,6 +25,7 @@
 
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <cutils/properties.h>
 
 static void freeSharedLibEntry(void* ptr);
 static void* lookupSharedLibMethod(const Method* method);
@@ -156,6 +157,9 @@ struct SharedLib {
     pthread_cond_t  onLoadCond;     /* wait for JNI_OnLoad in other thread */
     u4              onLoadThreadId; /* recursive invocation guard */
     OnLoadState     onLoadResult;   /* result of earlier JNI_OnLoad */
+#ifdef WITH_HOUDINI
+    bool        houdiniUsed;
+#endif
 };
 
 /*
@@ -298,6 +302,67 @@ static bool checkOnLoadResult(SharedLib* pEntry)
 
 typedef int (*OnLoadFunc)(JavaVM*, void*);
 
+
+#ifdef WITH_HOUDINI
+#define HOUDINI_PATH       "/system/lib/libhoudini.so"
+#define HOUDINI_BUILD_PROP "dalvik.vm.houdini"
+/*
+ * Get the shorty string for a method.
+ */
+const char* dvmGetMethodShorty(const Method* meth)
+{
+    return meth->shorty;
+}
+
+void* dvmHoudiniDlopen(const char *filename, int flag)
+{
+    void *handle;
+
+    struct dvm2hdEnv {
+        void *logger;
+        void *getShorty;
+    } env;
+
+    char propBuf[PROPERTY_VALUE_MAX];
+    property_get(HOUDINI_BUILD_PROP, propBuf, "");
+    //setting HOUDINI_BUILD_PROP to "on" will enable houdini
+    if(strncmp(propBuf, "on", sizeof(propBuf)) && strncmp(propBuf, "", sizeof(propBuf))) {
+        return NULL;
+    }
+
+    env.logger = (void*)__android_log_print;
+    env.getShorty = (void*)dvmGetMethodShorty;
+    if (!gDvm.libhoudiniInited) {
+        //TODO: hard code the path currently
+        handle = dlopen(HOUDINI_PATH,RTLD_NOW);
+        if (handle == NULL) {
+            return NULL;
+        }
+        gDvm.dvm2hdInit = (dvm2hdInit_ptr_t)dlsym(handle, "dvm2hdInit");
+        if (gDvm.dvm2hdInit == NULL) {
+            ALOGE("Cannot find symbol dvm2hdInit, please check the libhoudini library is correct: %s!\n", dlerror());
+            return NULL;
+        }
+        if (!gDvm.dvm2hdInit((void*)&env)) {
+            ALOGE("libhoudini init failed!\n");
+            return NULL;
+        }
+
+        gDvm.dvm2hdDlopen = (dvm2hdDlopen_ptr_t)dlsym(handle, "dvm2hdDlopen");
+        gDvm.dvm2hdDlsym = (dvm2hdDlsym_ptr_t)dlsym(handle, "dvm2hdDlsym");
+        gDvm.dvm2hdNeeded = (dvm2hdNeeded_ptr_t)dlsym(handle, "dvm2hdNeeded");
+        gDvm.dvm2hdNativeMethodHelper = (dvm2hdNativeMethodHelper_ptr_t)dlsym(handle, "dvm2hdNativeMethodHelper");
+        if (!gDvm.dvm2hdDlopen || !gDvm.dvm2hdDlsym || !gDvm.dvm2hdNeeded || !gDvm.dvm2hdNativeMethodHelper) {
+            ALOGE("The library symbol is missing, please check the libhoudini library is correct: %s!\n", dlerror());
+            return NULL;
+        }
+        gDvm.libhoudiniInited = true;
+    }
+
+    return gDvm.dvm2hdDlopen(filename, flag);
+}
+#endif
+
 /*
  * Load native code from the specified absolute pathname.  Per the spec,
  * if we've already loaded a library with the specified pathname, we
@@ -321,6 +386,9 @@ bool dvmLoadNativeCode(const char* pathName, Object* classLoader,
     SharedLib* pEntry;
     void* handle;
     bool verbose;
+#ifdef WITH_HOUDINI
+    bool houdiniUsed = false;
+#endif
 
     /* reduce noise by not chattering about system libraries */
     verbose = !!strncmp(pathName, "/system", sizeof("/system")-1);
@@ -384,8 +452,17 @@ bool dvmLoadNativeCode(const char* pathName, Object* classLoader,
     dvmChangeStatus(self, oldStatus);
 
     if (handle == NULL) {
-        *detail = strdup(dlerror());
-        return false;
+#ifdef WITH_HOUDINI
+        handle = dvmHoudiniDlopen(pathName, RTLD_LAZY);
+        if (handle == NULL) {
+#endif
+            *detail = strdup(dlerror());
+            return false;
+#ifdef WITH_HOUDINI
+        }
+        else
+            houdiniUsed = true;
+#endif
     }
 
     /* create a new entry */
@@ -393,6 +470,9 @@ bool dvmLoadNativeCode(const char* pathName, Object* classLoader,
     pNewEntry = (SharedLib*) calloc(1, sizeof(SharedLib));
     pNewEntry->pathName = strdup(pathName);
     pNewEntry->handle = handle;
+#ifdef WITH_HOUDINI
+    pNewEntry->houdiniUsed = houdiniUsed;
+#endif
     pNewEntry->classLoader = classLoader;
     dvmInitMutex(&pNewEntry->onLoadLock);
     pthread_cond_init(&pNewEntry->onLoadCond, NULL);
@@ -408,13 +488,21 @@ bool dvmLoadNativeCode(const char* pathName, Object* classLoader,
         return checkOnLoadResult(pActualEntry);
     } else {
         if (verbose)
-            ALOGD("Added shared lib %s %p", pathName, classLoader);
+#ifdef WITH_HOUDINI
+            ALOGD("Added shared lib %s[%s] %p\n", pathName, houdiniUsed?"houdiniUsed":"Native", classLoader);
+#else
+            ALOGD("Added shared lib %s %p\n", pathName, classLoader);
+#endif
 
         bool result = true;
         void* vonLoad;
         int version;
-
-        vonLoad = dlsym(handle, "JNI_OnLoad");
+#ifdef WITH_HOUDINI
+        if (houdiniUsed)
+            vonLoad = gDvm.dvm2hdDlsym(handle, "JNI_OnLoad");
+        else
+#endif
+            vonLoad = dlsym(handle, "JNI_OnLoad");
         if (vonLoad == NULL) {
             ALOGD("No JNI_OnLoad found in %s %p, skipping init",
                 pathName, classLoader);
@@ -433,7 +521,14 @@ bool dvmLoadNativeCode(const char* pathName, Object* classLoader,
             if (gDvm.verboseJni) {
                 ALOGI("[Calling JNI_OnLoad for \"%s\"]", pathName);
             }
-            version = (*func)(gDvmJni.jniVm, NULL);
+#ifdef WITH_HOUDINI
+            if (houdiniUsed) {
+                const void* argv[] = {gDvmJni.jniVm, NULL};//{gDvm.vmList, NULL};
+                gDvm.dvm2hdNativeMethodHelper(true, (void*)func, 'I', (void*)&version, 2, NULL, argv);
+            }
+            else
+#endif
+                version = (*func)(gDvmJni.jniVm, NULL);
             dvmChangeStatus(self, oldStatus);
             self->classLoaderOverride = prevOverride;
 
@@ -702,6 +797,10 @@ static int findMethodInLib(void* vlib, void* vmethod)
     } else
         ALOGV("+++ scanning '%s' for '%s'", pLib->pathName, meth->name);
 
+#ifdef WITH_HOUDINI
+    dvmSetHoudiniMethod((Method*)vmethod, pLib->houdiniUsed);
+#endif
+
     /*
      * First, we try it without the signature.
      */
@@ -715,7 +814,12 @@ static int findMethodInLib(void* vlib, void* vmethod)
         goto bail;
 
     ALOGV("+++ calling dlsym(%s)", mangleCM);
-    func = dlsym(pLib->handle, mangleCM);
+#ifdef WITH_HOUDINI
+    if (pLib->houdiniUsed)
+        func = gDvm.dvm2hdDlsym(pLib->handle, mangleCM);
+    else
+#endif
+        func = dlsym(pLib->handle, mangleCM);
     if (func == NULL) {
         mangleSig =
             createMangledSignature(&meth->prototype);
@@ -729,7 +833,12 @@ static int findMethodInLib(void* vlib, void* vmethod)
         sprintf(mangleCMSig, "%s__%s", mangleCM, mangleSig);
 
         ALOGV("+++ calling dlsym(%s)", mangleCMSig);
-        func = dlsym(pLib->handle, mangleCMSig);
+#ifdef WITH_HOUDINI
+        if (pLib->houdiniUsed)
+            func = gDvm.dvm2hdDlsym(pLib->handle, mangleCMSig);
+        else
+#endif
+            func = dlsym(pLib->handle, mangleCMSig);
         if (func != NULL) {
             ALOGV("Found '%s' with dlsym", mangleCMSig);
         }
