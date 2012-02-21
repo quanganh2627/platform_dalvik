@@ -75,6 +75,18 @@ enum ProfilerClockSource {
     kProfilerClockSourceDual,
 };
 
+#ifdef WITH_HOUDINI
+/*
+ * Type definition for Houdini
+ */
+typedef int(*dvm2hdInit_ptr_t)(void*);
+typedef void*(*dvm2hdDlopen_ptr_t)(const char*, int);
+typedef void*(*dvm2hdDlsym_ptr_t)(void*,const char*);
+typedef int(*dvm2hdNativeMethodHelper_ptr_t)(bool, void*, unsigned char,
+	       void*, unsigned int, const unsigned char*, const void **);
+typedef bool(*dvm2hdNeeded_ptr_t)(void*);
+#endif
+
 /*
  * All fields are initialized to zero.
  *
@@ -726,6 +738,16 @@ struct DvmGlobals {
 
     /* String pointed here will be deposited on the stack frame of dvmAbort */
     const char *lastMessage;
+
+#ifdef WITH_HOUDINI
+    /*dvm2hd function pointers and init flag */
+    dvm2hdInit_ptr_t               dvm2hdInit;
+    dvm2hdDlopen_ptr_t             dvm2hdDlopen;
+    dvm2hdDlsym_ptr_t              dvm2hdDlsym;
+    dvm2hdNativeMethodHelper_ptr_t dvm2hdNativeMethodHelper;
+    dvm2hdNeeded_ptr_t             dvm2hdNeeded;
+    bool  	                   libhoudiniInited;
+#endif
 };
 
 extern struct DvmGlobals gDvm;
