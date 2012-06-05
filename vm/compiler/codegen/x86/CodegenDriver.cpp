@@ -305,7 +305,7 @@ void *dvmCompilerGetInterpretTemplate()
 
 JitInstructionSetType dvmCompilerGetInterpretTemplateSet()
 {
-    return DALVIK_JIT_X86;
+    return DALVIK_JIT_IA32;
 }
 
 void dvmCompilerInitializeRegAlloc(CompilationUnit *cUnit)
