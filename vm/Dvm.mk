@@ -349,6 +349,6 @@ ifeq ($(MTERP_ARCH_KNOWN),false)
 	-DdvmAsmSisterStart=0 -DdvmAsmSisterEnd=0 -DDVM_NO_ASM_INTERP=1
 endif
 
-ifeq ($(WITH_HOUDINI),true)
+ifeq ($(INTEL_HOUDINI),true)
     LOCAL_CFLAGS += -DWITH_HOUDINI -DMTERP_NO_UNALIGN_64
 endif
