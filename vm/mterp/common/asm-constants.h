@@ -41,7 +41,9 @@
  * in a char instead of an int.
  */
 #if defined(__ARM_EABI__)
+#ifndef MTERP_NO_UNALIGN_64
 # define MTERP_NO_UNALIGN_64
+#endif
 #endif
 #if defined(HAVE_SHORT_ENUMS)
 # define MTERP_SMALL_ENUM   1
